@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── Color palette ─────────────────────────────────── */
+  --color-page:        #F8F9FB;
+  --color-heading:     #1E293B;
+  --color-body:        #334155;
+  --color-muted:       #64748B;
+  --color-border:      #E2E8F3;
+  --color-primary:     #3B6FD4;
+  --color-primary-hover: #2F5BB8;
+  --color-primary-fg:  #FFFFFF;
+  --color-zone-bg:     #EEF3FB;
+
+  /* ── Typography ────────────────────────────────────── */
+  --font-display: 'Lora', Georgia, serif;
+  --font-body:    'Inter', system-ui, sans-serif;
+}
+
+/* ── Global base styles ────────────────────────────── */
+html,
+body {
+  background-color: var(--color-page);
+  color: var(--color-body);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Visible keyboard focus ring */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Respect reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
