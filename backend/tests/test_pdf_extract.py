@@ -65,4 +65,3 @@ def test_invalid_pdf_bytes_raises_error() -> None:
     corrupted_data = b"NOT_A_VALID_PDF_HEADER_DATA"
     with pytest.raises(PDFExtractionError, match="Failed to open PDF"):
         extract_pdf_pages(corrupted_data)
-

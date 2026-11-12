@@ -1,0 +1,14 @@
+Create {num_questions} question-and-answer pairs from the document below.
+
+Difficulty: {difficulty}
+- easy: definitions and recall
+- medium: explain and relate concepts
+- hard: apply, compare, and reason about ideas
+
+Answer detail: {detail}
+- short: 1-2 sentences
+- detailed: 3-5 sentences
+
+<document>
+{document}
+</document>

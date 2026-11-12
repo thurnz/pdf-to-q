@@ -8,3 +8,15 @@ export interface QAItem {
   page?: number | null
 }
 
+export type Difficulty = 'easy' | 'medium' | 'hard'
+export type Detail = 'short' | 'detailed'
+
+export interface GenerationOptions {
+  num_questions: number
+  difficulty: Difficulty
+  detail: Detail
+}
+
+export interface QAGenerationResult {
+  questions: QAItem[]
+}

@@ -112,4 +112,3 @@ def test_build_qa_pdf_to_file() -> None:
         assert result_path == output_path
         assert output_path.exists()
         assert output_path.read_bytes().startswith(b"%PDF")
-
