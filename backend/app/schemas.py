@@ -46,3 +46,18 @@ class QAGenerationResult(BaseModel):
         default_factory=list,
         description="List of extracted study guide question-and-answer items.",
     )
+
+
+class JobStatus(BaseModel):
+    """Public representation of a processing job's status."""
+
+    id: str = Field(..., description="Unique job identifier.")
+    status: Literal["queued", "processing", "done", "failed"] = Field(
+        ..., description="Current job lifecycle status."
+    )
+    progress: float = Field(
+        ..., ge=0.0, le=1.0, description="Processing progress from 0.0 to 1.0."
+    )
+    error: str | None = Field(
+        default=None, description="Human-readable error message if job failed."
+    )

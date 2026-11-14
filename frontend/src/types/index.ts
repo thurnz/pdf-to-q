@@ -20,3 +20,12 @@ export interface GenerationOptions {
 export interface QAGenerationResult {
   questions: QAItem[]
 }
+
+export type JobLifecycleStatus = 'queued' | 'processing' | 'done' | 'failed'
+
+export interface JobStatus {
+  id: string
+  status: JobLifecycleStatus
+  progress: number
+  error?: string | null
+}

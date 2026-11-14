@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 20
     max_page_count: int = 200
 
+    # Rate limiting (requests per minute per IP on POST /jobs)
+    rate_limit_per_minute: int = 5
+
     # File retention (seconds)
     file_retention_seconds: int = 3600
 
