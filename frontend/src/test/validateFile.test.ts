@@ -74,4 +74,3 @@ describe('validateFile', () => {
     expect(validateFile(exactFile)).toBeNull()
   })
 })
-

@@ -1,64 +1,144 @@
+import { useEffect, useState } from 'react'
+import { createJob } from './api/client'
+import { ErrorView } from './components/ErrorView'
+import { OptionsForm } from './components/OptionsForm'
+import { ProgressView } from './components/ProgressView'
+import { ResultView } from './components/ResultView'
+import { UploadDropzone } from './components/UploadDropzone'
+import { useJobPolling } from './hooks/useJobPolling'
+import type { GenerationOptions } from './types'
+import { validateFile } from './utils/validateFile'
+
+type AppState = 'idle' | 'uploading' | 'processing' | 'done' | 'failed'
+
+const DEFAULT_OPTIONS: GenerationOptions = {
+  num_questions: 10,
+  difficulty: 'medium',
+  detail: 'short',
+}
+
 export default function App() {
+  const [appState, setAppState] = useState<AppState>('idle')
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [fileError, setFileError] = useState<string | null>(null)
+  const [options, setOptions] = useState<GenerationOptions>(DEFAULT_OPTIONS)
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  // Poll only while processing
+  const { job, error: pollError } = useJobPolling(appState === 'processing' ? jobId : null)
+
+  useEffect(() => {
+    if (appState !== 'processing') return
+
+    if (job?.status === 'done') {
+      setAppState('done')
+    } else if (job?.status === 'failed') {
+      setAppState('failed')
+      setErrorMessage(job.error || 'Study guide generation failed.')
+    } else if (pollError) {
+      setAppState('failed')
+      setErrorMessage(pollError)
+    }
+  }, [appState, job, pollError])
+
+  const handleFileSelect = (file: File | null) => {
+    if (!file) {
+      setSelectedFile(null)
+      setFileError(null)
+      return
+    }
+
+    const validation = validateFile(file)
+    setSelectedFile(file)
+    setFileError(validation)
+  }
+
+  const handleSubmit = async () => {
+    if (!selectedFile || fileError) return
+
+    setAppState('uploading')
+    setErrorMessage(null)
+
+    try {
+      const response = await createJob(selectedFile, options)
+      setJobId(response.id)
+      setAppState('processing')
+    } catch (err: unknown) {
+      setAppState('failed')
+      const message = err instanceof Error ? err.message : 'Failed to submit document.'
+      setErrorMessage(message)
+    }
+  }
+
+  const handleRetry = () => {
+    setAppState('idle')
+    setJobId(null)
+    setErrorMessage(null)
+  }
+
+  const handleReset = () => {
+    setAppState('idle')
+    setJobId(null)
+    setSelectedFile(null)
+    setFileError(null)
+    setErrorMessage(null)
+    setOptions(DEFAULT_OPTIONS)
+  }
+
   return (
-    <main className="min-h-screen flex flex-col items-center px-4 py-16 sm:py-24">
+    <main className="min-h-screen bg-page text-body flex flex-col items-center px-4 py-12 sm:py-20">
       {/* ── Header ───────────────────────────────────────── */}
-      <header className="w-full max-w-2xl mb-12">
-        <h1
-          className="text-4xl sm:text-5xl font-bold leading-tight mb-4"
-          style={{ fontFamily: 'var(--font-display)', color: 'var(--color-heading)' }}
-        >
+      <header className="w-full max-w-2xl mb-10 text-center sm:text-left">
+        <h1 className="text-4xl sm:text-5xl font-bold font-display text-heading leading-tight mb-4">
           Study Guide Generator
         </h1>
-        <p className="text-lg leading-relaxed max-w-prose" style={{ color: 'var(--color-muted)' }}>
+        <p className="text-lg text-muted leading-relaxed max-w-prose">
           Upload a PDF — lecture notes, a chapter, a paper — and get a focused question-and-answer
           study guide back as a PDF you can print or annotate.
         </p>
       </header>
 
-      {/* ── Upload zone placeholder ───────────────────────── */}
-      <section
-        aria-label="Upload area"
-        className="w-full max-w-2xl rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-3 py-16 px-6 text-center"
-        style={{
-          borderColor: 'var(--color-border)',
-          backgroundColor: 'var(--color-zone-bg)',
-        }}
-      >
-        {/* Cloud-upload icon (inline SVG, no icon lib needed) */}
-        <svg
-          aria-hidden="true"
-          width="40"
-          height="40"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          style={{ color: 'var(--color-primary)' }}
-        >
-          <polyline points="16 16 12 12 8 16" />
-          <line x1="12" y1="12" x2="12" y2="21" />
-          <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" />
-        </svg>
+      {/* ── Content Area ─────────────────────────────────── */}
+      <div className="w-full max-w-2xl flex flex-col items-center gap-6">
+        {appState === 'idle' && (
+          <div className="w-full flex flex-col gap-6">
+            <UploadDropzone file={selectedFile} onFileSelect={handleFileSelect} error={fileError} />
 
-        <p className="text-base font-medium" style={{ color: 'var(--color-heading)' }}>
-          Drop your PDF here
-        </p>
-        <p className="text-sm" style={{ color: 'var(--color-muted)' }}>
-          or{' '}
-          <button
-            type="button"
-            className="underline underline-offset-2 cursor-pointer"
-            style={{ color: 'var(--color-primary)' }}
-          >
-            choose a file
-          </button>
-        </p>
-        <p className="text-xs mt-1" style={{ color: 'var(--color-muted)' }}>
-          PDF only · up to 20 MB · 200 pages
-        </p>
-      </section>
+            <OptionsForm options={options} onChange={setOptions} />
+
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={!selectedFile || Boolean(fileError)}
+              className="w-full py-3 px-6 rounded-lg font-semibold bg-primary hover:bg-primary-hover text-primary-fg transition-colors focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:opacity-40 disabled:cursor-not-allowed shadow-xs"
+            >
+              Generate Study Guide
+            </button>
+          </div>
+        )}
+
+        {appState === 'uploading' && (
+          <ProgressView status="uploading" progress={0.08} fileName={selectedFile?.name} />
+        )}
+
+        {appState === 'processing' && (
+          <ProgressView
+            status={job?.status === 'queued' ? 'queued' : 'processing'}
+            progress={job?.progress ?? 0.15}
+            fileName={selectedFile?.name}
+          />
+        )}
+
+        {appState === 'done' && jobId && <ResultView jobId={jobId} onReset={handleReset} />}
+
+        {appState === 'failed' && (
+          <ErrorView
+            error={errorMessage || 'An unexpected error occurred.'}
+            onRetry={handleRetry}
+          />
+        )}
+      </div>
     </main>
   )
 }
