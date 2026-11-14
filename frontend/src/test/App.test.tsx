@@ -13,4 +13,3 @@ describe('App', () => {
     expect(screen.getByRole('region', { name: /upload area/i })).toBeInTheDocument()
   })
 })
-

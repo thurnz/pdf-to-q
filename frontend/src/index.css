@@ -1,20 +1,20 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 @theme {
   /* ── Color palette ─────────────────────────────────── */
-  --color-page:        #F8F9FB;
-  --color-heading:     #1E293B;
-  --color-body:        #334155;
-  --color-muted:       #64748B;
-  --color-border:      #E2E8F3;
-  --color-primary:     #3B6FD4;
-  --color-primary-hover: #2F5BB8;
-  --color-primary-fg:  #FFFFFF;
-  --color-zone-bg:     #EEF3FB;
+  --color-page: #f8f9fb;
+  --color-heading: #1e293b;
+  --color-body: #334155;
+  --color-muted: #64748b;
+  --color-border: #e2e8f3;
+  --color-primary: #3b6fd4;
+  --color-primary-hover: #2f5bb8;
+  --color-primary-fg: #ffffff;
+  --color-zone-bg: #eef3fb;
 
   /* ── Typography ────────────────────────────────────── */
   --font-display: 'Lora', Georgia, serif;
-  --font-body:    'Inter', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
 }
 
 /* ── Global base styles ────────────────────────────── */
@@ -41,4 +41,3 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
-
