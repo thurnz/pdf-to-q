@@ -15,6 +15,12 @@ class RateLimitError(LLMError):
     pass
 
 
+class ProviderUnavailableError(LLMError):
+    """Raised when an LLM provider encounters service unavailability (500/503) after retries."""
+
+    pass
+
+
 class LLMProvider(ABC):
     """Abstract interface for LLM provider implementations."""
 

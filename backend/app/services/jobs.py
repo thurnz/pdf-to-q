@@ -9,7 +9,12 @@ from typing import Literal
 import uuid
 
 from app.config import get_settings
-from app.llm.base import LLMError, LLMProvider, RateLimitError
+from app.llm.base import (
+    LLMError,
+    LLMProvider,
+    ProviderUnavailableError,
+    RateLimitError,
+)
 from app.schemas import GenerationOptions, JobStatus
 from app.services.pdf_builder import build_qa_pdf_to_file
 from app.services.pdf_extract import ScannedPDFError, extract_pdf_pages
@@ -238,6 +243,13 @@ def process_job(
             job_id,
             status="failed",
             error="AI service is rate limited, try again later",
+        )
+    except ProviderUnavailableError:
+        logger.warning("Job %s failed: AI service unavailable", job_id)
+        active_store.update_job(
+            job_id,
+            status="failed",
+            error="The AI service is busy right now, please try again in a few minutes.",
         )
     except LLMError:
         logger.warning("Job %s failed: AI service error", job_id)

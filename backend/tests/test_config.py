@@ -90,3 +90,25 @@ def test_allowed_origins_from_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALLOWED_ORIGINS", "")
     settings_empty = Settings(_env_file=None, gemini_model="test-model")
     assert settings_empty.allowed_origins == DEFAULT_ALLOWED_ORIGINS
+
+
+def test_llm_retry_and_fallback_defaults() -> None:
+    """Config has expected default values for fallback model and retry behavior."""
+    settings = Settings(_env_file=None, gemini_model="test-model")
+    assert settings.gemini_fallback_model == ""
+    assert settings.llm_max_attempts == 4
+    assert settings.llm_retry_base_seconds == 2.0
+
+
+def test_llm_retry_and_fallback_custom() -> None:
+    """Custom fallback model and retry parameters are correctly loaded."""
+    settings = Settings(
+        _env_file=None,
+        gemini_model="test-model",
+        gemini_fallback_model="backup-model",
+        llm_max_attempts=2,
+        llm_retry_base_seconds=0.0,
+    )
+    assert settings.gemini_fallback_model == "backup-model"
+    assert settings.llm_max_attempts == 2
+    assert settings.llm_retry_base_seconds == 0.0

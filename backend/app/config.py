@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     llm_provider: str = "gemini"
     gemini_api_key: str = ""
     gemini_model: str
+    gemini_fallback_model: str = ""
+    llm_max_attempts: int = 4
+    llm_retry_base_seconds: float = 2.0
     openai_compat_base_url: str = ""
     openai_compat_api_key: str = ""
 

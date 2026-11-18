@@ -6,7 +6,12 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 
-from app.llm.base import LLMError, LLMProvider, RateLimitError
+from app.llm.base import (
+    LLMError,
+    LLMProvider,
+    ProviderUnavailableError,
+    RateLimitError,
+)
 from app.schemas import GenerationOptions, JobStatus
 from app.services.jobs import JobStore, process_job
 from app.services.qa_generator import DocumentTooLongError
@@ -114,6 +119,24 @@ def test_process_job_rate_limit_error() -> None:
     assert updated is not None
     assert updated.status == "failed"
     assert updated.error == "AI service is rate limited, try again later"
+
+
+def test_process_job_provider_unavailable_error() -> None:
+    """ProviderUnavailableError maps to 'The AI service is busy right now, please try again in a few minutes.'."""
+    store = JobStore()
+    options = GenerationOptions()
+    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+    provider = FakeProvider(ProviderUnavailableError("503 Service Unavailable"))
+
+    process_job(job.id, provider=provider, store=store)
+
+    updated = store.get_job(job.id)
+    assert updated is not None
+    assert updated.status == "failed"
+    assert (
+        updated.error
+        == "The AI service is busy right now, please try again in a few minutes."
+    )
 
 
 def test_process_job_other_llm_error() -> None:

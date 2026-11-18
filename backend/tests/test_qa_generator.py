@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.llm.base import LLMError, LLMProvider, RateLimitError
+from app.llm.base import (
+    LLMError,
+    LLMProvider,
+    ProviderUnavailableError,
+    RateLimitError,
+)
 from app.llm.gemini import GeminiProvider
 from app.schemas import GenerationOptions, QAItem
 from app.services.qa_generator import (
@@ -197,11 +202,25 @@ def test_generate_qa_prompt_injection_and_braces_in_document() -> None:
     assert "</document>" in prompt
 
 
+class DummyAPIError(Exception):
+    """Exception simulating google.genai.errors.APIError with code and optional retry_after."""
+
+    def __init__(
+        self, code: int, message: str = "", retry_after: float | None = None
+    ) -> None:
+        super().__init__(f"{code} {message}")
+        self.code = code
+        self.retry_after = retry_after
+
+
 def test_gemini_provider_rate_limit_retry() -> None:
     """GeminiProvider retries on HTTP 429 and raises RateLimitError if retries are exhausted."""
     mock_settings = MagicMock()
     mock_settings.gemini_api_key = "fake_key"
     mock_settings.gemini_model = "test-model"
+    mock_settings.gemini_fallback_model = ""
+    mock_settings.llm_max_attempts = 4
+    mock_settings.llm_retry_base_seconds = 2.0
 
     with (
         patch("app.llm.gemini.genai.Client") as mock_client_cls,
@@ -209,10 +228,9 @@ def test_gemini_provider_rate_limit_retry() -> None:
     ):
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
-
-        # Simulate 429 error
-        mock_error = Exception("429 Resource exhausted: quota exceeded")
-        mock_client.models.generate_content.side_effect = mock_error
+        mock_client.models.generate_content.side_effect = DummyAPIError(
+            429, "Resource exhausted: quota exceeded"
+        )
 
         provider = GeminiProvider(mock_settings, base_delay=2.0)
 
@@ -229,6 +247,9 @@ def test_gemini_provider_503_retry_then_success() -> None:
     mock_settings = MagicMock()
     mock_settings.gemini_api_key = "fake_key"
     mock_settings.gemini_model = "test-model"
+    mock_settings.gemini_fallback_model = ""
+    mock_settings.llm_max_attempts = 4
+    mock_settings.llm_retry_base_seconds = 0.0
 
     with (
         patch("app.llm.gemini.genai.Client") as mock_client_cls,
@@ -237,7 +258,7 @@ def test_gemini_provider_503_retry_then_success() -> None:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
-        mock_error_503 = Exception("503 Service Unavailable: backend overloaded")
+        mock_error_503 = DummyAPIError(503, "Service Unavailable: backend overloaded")
         mock_success_response = MagicMock()
         mock_success_response.text = '{"questions": []}'
 
@@ -255,11 +276,42 @@ def test_gemini_provider_503_retry_then_success() -> None:
         assert mock_sleep.call_count == 0
 
 
-def test_gemini_provider_404_not_found() -> None:
-    """GeminiProvider immediately raises LLMError on 404 without retrying."""
+def test_gemini_provider_repeated_503_raises_provider_unavailable() -> None:
+    """Repeated 503 errors exhaust retries and raise ProviderUnavailableError."""
     mock_settings = MagicMock()
     mock_settings.gemini_api_key = "fake_key"
-    mock_settings.gemini_model = "retired-model"
+    mock_settings.gemini_model = "test-model"
+    mock_settings.gemini_fallback_model = ""
+    mock_settings.llm_max_attempts = 4
+    mock_settings.llm_retry_base_seconds = 0.0
+
+    with (
+        patch("app.llm.gemini.genai.Client") as mock_client_cls,
+        patch("app.llm.gemini.time.sleep") as mock_sleep,
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.models.generate_content.side_effect = DummyAPIError(
+            503, "Service Unavailable"
+        )
+
+        provider = GeminiProvider(mock_settings, base_delay=0)
+
+        with pytest.raises(ProviderUnavailableError, match=r"Gemini API error \(503\)"):
+            provider.generate_json("test prompt")
+
+        assert mock_client.models.generate_content.call_count == 4
+        assert mock_sleep.call_count == 0
+
+
+def test_gemini_provider_fallback_success() -> None:
+    """When primary model fails with 503 after retries, fallback model is tried once and succeeds."""
+    mock_settings = MagicMock()
+    mock_settings.gemini_api_key = "fake_key"
+    mock_settings.gemini_model = "primary-model"
+    mock_settings.gemini_fallback_model = "fallback-model"
+    mock_settings.llm_max_attempts = 4
+    mock_settings.llm_retry_base_seconds = 0.0
 
     with (
         patch("app.llm.gemini.genai.Client") as mock_client_cls,
@@ -268,7 +320,50 @@ def test_gemini_provider_404_not_found() -> None:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
-        mock_error = Exception("404 NOT_FOUND: models/retired-model is not found")
+        mock_error_503 = DummyAPIError(503, "Service Unavailable")
+        mock_success = MagicMock()
+        mock_success.text = '{"questions": [{"question": "Q?", "answer": "A."}]}'
+
+        # 4 failures for primary-model, then success on 5th call for fallback-model
+        mock_client.models.generate_content.side_effect = [
+            mock_error_503,
+            mock_error_503,
+            mock_error_503,
+            mock_error_503,
+            mock_success,
+        ]
+
+        provider = GeminiProvider(mock_settings, base_delay=0)
+        result = provider.generate_json("test prompt")
+
+        assert result == '{"questions": [{"question": "Q?", "answer": "A."}]}'
+        assert mock_client.models.generate_content.call_count == 5
+
+        # Verify models passed in calls
+        calls = mock_client.models.generate_content.call_args_list
+        for call in calls[:4]:
+            assert call.kwargs["model"] == "primary-model"
+        assert calls[4].kwargs["model"] == "fallback-model"
+        assert mock_sleep.call_count == 0
+
+
+def test_gemini_provider_404_not_found() -> None:
+    """GeminiProvider immediately raises LLMError on 404 without retrying or fallback."""
+    mock_settings = MagicMock()
+    mock_settings.gemini_api_key = "fake_key"
+    mock_settings.gemini_model = "retired-model"
+    mock_settings.gemini_fallback_model = "fallback-model"
+    mock_settings.llm_max_attempts = 4
+    mock_settings.llm_retry_base_seconds = 0.0
+
+    with (
+        patch("app.llm.gemini.genai.Client") as mock_client_cls,
+        patch("app.llm.gemini.time.sleep") as mock_sleep,
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        mock_error = DummyAPIError(404, "models/retired-model is not found")
         mock_client.models.generate_content.side_effect = mock_error
 
         provider = GeminiProvider(mock_settings, base_delay=0)
@@ -280,17 +375,20 @@ def test_gemini_provider_404_not_found() -> None:
         with pytest.raises(LLMError, match=expected_msg):
             provider.generate_json("test prompt")
 
-        # Must not retry: exactly 1 call and 0 sleeps
+        # Must not retry or fall back: exactly 1 call and 0 sleeps
         assert mock_client.models.generate_content.call_count == 1
         assert mock_sleep.call_count == 0
 
 
 @pytest.mark.parametrize("status_code", [400, 401, 403])
 def test_gemini_provider_does_not_retry_client_errors(status_code: int) -> None:
-    """GeminiProvider immediately raises LLMError on 400, 401, 403 without retrying."""
+    """GeminiProvider immediately raises LLMError on 400, 401, 403 without retrying or fallback."""
     mock_settings = MagicMock()
     mock_settings.gemini_api_key = "fake_key"
     mock_settings.gemini_model = "test-model"
+    mock_settings.gemini_fallback_model = "fallback-model"
+    mock_settings.llm_max_attempts = 4
+    mock_settings.llm_retry_base_seconds = 0.0
 
     with (
         patch("app.llm.gemini.genai.Client") as mock_client_cls,
@@ -298,8 +396,8 @@ def test_gemini_provider_does_not_retry_client_errors(status_code: int) -> None:
     ):
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
-        mock_client.models.generate_content.side_effect = Exception(
-            f"{status_code} Client Error"
+        mock_client.models.generate_content.side_effect = DummyAPIError(
+            status_code, "Client Error"
         )
 
         provider = GeminiProvider(mock_settings, base_delay=0)
@@ -308,3 +406,36 @@ def test_gemini_provider_does_not_retry_client_errors(status_code: int) -> None:
 
         assert mock_client.models.generate_content.call_count == 1
         assert mock_sleep.call_count == 0
+
+
+def test_gemini_provider_honors_retry_after() -> None:
+    """When API error provides retry_after, provider sleeps for that duration."""
+    mock_settings = MagicMock()
+    mock_settings.gemini_api_key = "fake_key"
+    mock_settings.gemini_model = "test-model"
+    mock_settings.gemini_fallback_model = ""
+    mock_settings.llm_max_attempts = 4
+    mock_settings.llm_retry_base_seconds = 2.0
+
+    with (
+        patch("app.llm.gemini.genai.Client") as mock_client_cls,
+        patch("app.llm.gemini.time.sleep") as mock_sleep,
+    ):
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        mock_error = DummyAPIError(429, "Rate limit", retry_after=7.5)
+        mock_success = MagicMock()
+        mock_success.text = '{"questions": []}'
+
+        mock_client.models.generate_content.side_effect = [
+            mock_error,
+            mock_success,
+        ]
+
+        provider = GeminiProvider(mock_settings, base_delay=2.0)
+        result = provider.generate_json("test prompt")
+
+        assert result == '{"questions": []}'
+        assert mock_client.models.generate_content.call_count == 2
+        mock_sleep.assert_called_once_with(7.5)
