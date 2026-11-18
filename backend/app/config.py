@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 20
     max_page_count: int = 200
 
+    # Chunking & LLM document limits
+    chunk_max_chars: int = 30000
+    max_chunks: int = 12
+    chunk_delay_seconds: float = 0.0
+
     # Rate limiting (requests per minute per IP on POST /jobs)
     rate_limit_per_minute: int = 5
 

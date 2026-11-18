@@ -112,3 +112,22 @@ def test_llm_retry_and_fallback_custom() -> None:
     assert settings.gemini_fallback_model == "backup-model"
     assert settings.llm_max_attempts == 2
     assert settings.llm_retry_base_seconds == 0.0
+
+
+def test_chunking_config_defaults_and_custom() -> None:
+    """Config has expected default values and accepts overrides for chunking parameters."""
+    defaults = Settings(_env_file=None, gemini_model="test-model")
+    assert defaults.chunk_max_chars == 30000
+    assert defaults.max_chunks == 12
+    assert defaults.chunk_delay_seconds == 0.0
+
+    custom = Settings(
+        _env_file=None,
+        gemini_model="test-model",
+        chunk_max_chars=15000,
+        max_chunks=6,
+        chunk_delay_seconds=1.5,
+    )
+    assert custom.chunk_max_chars == 15000
+    assert custom.max_chunks == 6
+    assert custom.chunk_delay_seconds == 1.5

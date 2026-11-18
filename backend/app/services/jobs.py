@@ -200,17 +200,27 @@ def process_job(
         # Stage 1: PDF extraction
         extraction_result = extract_pdf_pages(job.input_path)
         extraction_result.require_extractable_text()
-        active_store.update_job(job_id, progress=0.3)
+        active_store.update_job(job_id, progress=0.2)
 
-        # Stage 2: Q&A generation via LLM
+        # Stage 2: Q&A generation via LLM (progress moves across chunks from 0.2 to 0.9)
+        def on_chunk_progress(chunk_index: int, total_chunks: int) -> None:
+            frac = (chunk_index + 1) / total_chunks if total_chunks > 0 else 1.0
+            p = 0.2 + (0.7 * frac)
+            active_store.update_job(job_id, progress=round(p, 2))
+
+        settings = get_settings()
         qa_items = generate_qa(
             pages=extraction_result.pages,
             options=job.options,
             provider=provider,
+            chunk_max_chars=settings.chunk_max_chars,
+            max_chunks=settings.max_chunks,
+            chunk_delay_seconds=settings.chunk_delay_seconds,
+            on_progress=on_chunk_progress,
         )
         if not qa_items:
             raise ValueError("No questions could be generated from this document")
-        active_store.update_job(job_id, progress=0.7)
+        active_store.update_job(job_id, progress=0.9)
 
         # Stage 3: Output PDF generation
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -230,12 +240,13 @@ def process_job(
             status="failed",
             error="Scanned PDF not supported yet: document contains little or no extractable text",
         )
-    except DocumentTooLongError:
-        logger.warning("Job %s failed: document exceeded length limit", job_id)
+    except DocumentTooLongError as exc:
+        logger.warning("Job %s failed: document exceeded length limit: %s", job_id, exc)
+        msg = str(exc).strip()
         active_store.update_job(
             job_id,
             status="failed",
-            error="Document is too long for now",
+            error=msg if "smaller section" in msg else "Document is too long for now",
         )
     except RateLimitError:
         logger.warning("Job %s failed: AI service rate limited", job_id)

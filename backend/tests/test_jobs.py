@@ -12,7 +12,7 @@ from app.llm.base import (
     ProviderUnavailableError,
     RateLimitError,
 )
-from app.schemas import GenerationOptions, JobStatus
+from app.schemas import GenerationOptions, JobStatus, QAItem
 from app.services.jobs import JobStore, process_job
 from app.services.qa_generator import DocumentTooLongError
 
@@ -104,6 +104,38 @@ def test_process_job_too_long_document() -> None:
     assert updated is not None
     assert updated.status == "failed"
     assert updated.error == "Document is too long for now"
+
+
+def test_process_job_progress_across_chunks() -> None:
+    """Multi-chunk processing updates job progress from 0.2 across chunks up to 0.9 and 1.0."""
+    store = JobStore()
+    options = GenerationOptions()
+    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+
+    progress_history: list[float] = []
+    original_update_job = store.update_job
+
+    def track_update(job_id: str, **kwargs: object) -> object:
+        if "progress" in kwargs:
+            progress_history.append(float(kwargs["progress"]))
+        return original_update_job(job_id, **kwargs)
+
+    store.update_job = track_update  # type: ignore[method-assign]
+
+    def fake_generate_qa(*args: object, **kwargs: object) -> list[QAItem]:
+        cb = kwargs.get("on_progress")
+        if callable(cb):
+            cb(0, 2)
+            cb(1, 2)
+        return [QAItem(question="Q?", answer="A.", page=1)]
+
+    with patch("app.services.jobs.generate_qa", side_effect=fake_generate_qa):
+        process_job(job.id, provider=FakeProvider("{}"), store=store)
+
+    assert 0.2 in progress_history
+    assert 0.55 in progress_history
+    assert 0.9 in progress_history
+    assert 1.0 in progress_history
 
 
 def test_process_job_rate_limit_error() -> None:

@@ -16,6 +16,7 @@ from app.schemas import GenerationOptions, QAItem
 from app.services.qa_generator import (
     DocumentTooLongError,
     QAValidationError,
+    distribute_questions,
     generate_qa,
 )
 
@@ -23,7 +24,7 @@ from app.services.qa_generator import (
 class FakeProvider(LLMProvider):
     """Test double for LLMProvider that returns pre-configured responses."""
 
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(self, responses: list[str | Exception]) -> None:
         self.responses = list(responses)
         self.call_history: list[tuple[str, str | None]] = []
 
@@ -31,7 +32,10 @@ class FakeProvider(LLMProvider):
         self.call_history.append((prompt, system))
         if not self.responses:
             raise LLMError("FakeProvider has no remaining responses.")
-        return self.responses.pop(0)
+        resp = self.responses.pop(0)
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
 
 
 def test_generate_qa_valid_output() -> None:
@@ -156,16 +160,156 @@ def test_generate_qa_duplicate_removal_and_empty_filtering() -> None:
 
 
 def test_generate_qa_too_long_document_error() -> None:
-    """Exceeding max_chars raises DocumentTooLongError before invoking provider."""
-    long_text = "A" * 1000
-    pages = [(1, long_text)]
+    """Exceeding max_chunks raises DocumentTooLongError with clear instructions."""
+    pages = [(1, "A" * 600), (2, "B" * 600)]
     options = GenerationOptions()
     provider = FakeProvider([])
 
-    with pytest.raises(DocumentTooLongError, match="exceeds maximum allowed limit"):
-        generate_qa(pages, options, provider, max_chars=500)
+    with pytest.raises(
+        DocumentTooLongError, match=r"Document is too long.*smaller section"
+    ):
+        generate_qa(pages, options, provider, chunk_max_chars=500, max_chunks=1)
 
     assert len(provider.call_history) == 0
+
+
+def test_distribute_questions_proportions_and_bounds() -> None:
+    """Questions are split in proportion to length, at least 1 per chunk, <= 110% total."""
+    # 2 equal chunks
+    alloc = distribute_questions([10000, 10000], 10)
+    assert alloc == [5, 5]
+    assert sum(alloc) == 10
+
+    # 3 chunks with 1:2:1 ratio
+    alloc3 = distribute_questions([1000, 2000, 1000], 10)
+    assert len(alloc3) == 3
+    assert alloc3[1] > alloc3[0]
+    assert min(alloc3) >= 1
+    assert sum(alloc3) <= int(10 * 1.10)
+
+    # More chunks than questions: each gets at least 1
+    alloc_many = distribute_questions([100] * 5, 2)
+    assert alloc_many == [1, 1, 1, 1, 1]
+
+
+def test_generate_qa_multichunk_sequential_merge_and_sort() -> None:
+    """Multiple chunks are processed sequentially, merged, and sorted by page reference."""
+    # 2 pages that will split into 2 chunks with max_chars=100
+    p1_text = "Page 1 content about economics." * 3  # ~96 chars
+    p2_text = "Page 2 content about finance." * 3
+
+    resp1 = json.dumps(
+        {
+            "questions": [
+                {"question": "Q on page 2?", "answer": "A2.", "page": 2},
+                {"question": "Q on page 1?", "answer": "A1.", "page": 1},
+            ]
+        }
+    )
+    resp2 = json.dumps(
+        {
+            "questions": [
+                {"question": "General question?", "answer": "AGen.", "page": None},
+                {"question": "Another Q on page 2?", "answer": "A2b.", "page": 2},
+            ]
+        }
+    )
+    provider = FakeProvider([resp1, resp2])
+    options = GenerationOptions(num_questions=4)
+
+    pages = [(1, p1_text), (2, p2_text)]
+    result = generate_qa(pages, options, provider, chunk_max_chars=100)
+
+    # Verify provider called twice (sequentially)
+    assert len(provider.call_history) == 2
+
+    # Verify merged result count
+    assert len(result) == 4
+
+    # Verify sorted by page: 1 -> 2 -> 2 -> None
+    assert result[0].page == 1
+    assert result[1].page == 2
+    assert result[2].page == 2
+    assert result[3].page is None
+
+
+def test_generate_qa_multichunk_removes_duplicates() -> None:
+    """Duplicate questions appearing across different chunks are deduped case-insensitively."""
+    resp1 = json.dumps(
+        {
+            "questions": [
+                {"question": "What is inflation?", "answer": "Price rise.", "page": 1},
+                {"question": "What is GDP?", "answer": "Output measure.", "page": 1},
+            ]
+        }
+    )
+    # Duplicate question in chunk 2 with different casing/whitespace
+    resp2 = json.dumps(
+        {
+            "questions": [
+                {
+                    "question": "  what is INFLATION?  ",
+                    "answer": "A rise in price.",
+                    "page": 2,
+                },
+                {"question": "What is recession?", "answer": "GDP decline.", "page": 2},
+            ]
+        }
+    )
+    provider = FakeProvider([resp1, resp2])
+    options = GenerationOptions(num_questions=5)
+
+    pages = [(1, "A" * 30), (2, "B" * 30)]
+    result = generate_qa(pages, options, provider, chunk_max_chars=50)
+
+    # Should have 3 unique questions instead of 4
+    assert len(result) == 3
+    q_texts = [r.question for r in result]
+    assert "What is inflation?" in q_texts
+    assert "What is GDP?" in q_texts
+    assert "What is recession?" in q_texts
+
+
+def test_generate_qa_multichunk_failure_halts() -> None:
+    """If an intermediate chunk fails, generation halts and raises the error."""
+    resp1 = json.dumps(
+        {
+            "questions": [
+                {"question": "Chunk 1 Q?", "answer": "Ans 1.", "page": 1},
+            ]
+        }
+    )
+    # 2nd chunk triggers RateLimitError
+    provider = FakeProvider([resp1, RateLimitError("Rate limit exceeded")])
+    options = GenerationOptions(num_questions=4)
+
+    pages = [(1, "A" * 30), (2, "B" * 30)]
+    with pytest.raises(RateLimitError):
+        generate_qa(pages, options, provider, chunk_max_chars=50)
+
+
+def test_generate_qa_progress_callback() -> None:
+    """Progress callback receives chunk_index and total_chunks for each completed chunk."""
+    resp1 = json.dumps({"questions": [{"question": "Q1?", "answer": "A1.", "page": 1}]})
+    resp2 = json.dumps({"questions": [{"question": "Q2?", "answer": "A2.", "page": 2}]})
+    provider = FakeProvider([resp1, resp2])
+    options = GenerationOptions(num_questions=2)
+
+    progress_events: list[tuple[int, int]] = []
+
+    def on_progress(chunk_idx: int, total_chunks: int) -> None:
+        progress_events.append((chunk_idx, total_chunks))
+
+    pages = [(1, "A" * 30), (2, "B" * 30)]
+    generate_qa(
+        pages,
+        options,
+        provider,
+        chunk_max_chars=50,
+        on_progress=on_progress,
+    )
+
+    assert progress_events == [(0, 2), (1, 2)]
 
 
 def test_generate_qa_prompt_injection_and_braces_in_document() -> None:
