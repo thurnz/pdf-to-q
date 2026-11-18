@@ -179,5 +179,6 @@ def download_job_pdf(job_id: str) -> FileResponse:
     return FileResponse(
         path=job.output_path,
         media_type="application/pdf",
-        filename=f"study_guide_{job_id}.pdf",
+        filename="study-guide.pdf",
+        headers={"Content-Disposition": 'attachment; filename="study-guide.pdf"'},
     )

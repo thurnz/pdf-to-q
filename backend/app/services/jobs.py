@@ -144,6 +144,30 @@ class JobStore:
 # Global job store singleton
 job_store = JobStore()
 
+# Concurrency semaphore singleton for rate-limiting simultaneous processing jobs
+_processing_semaphore: threading.Semaphore | None = None
+_semaphore_lock = threading.Lock()
+
+
+def get_processing_semaphore() -> threading.Semaphore:
+    """Get or initialize the global concurrency limiter semaphore."""
+    global _processing_semaphore
+    with _semaphore_lock:
+        if _processing_semaphore is None:
+            _processing_semaphore = threading.Semaphore(
+                get_settings().max_concurrent_jobs
+            )
+        return _processing_semaphore
+
+
+def reset_processing_semaphore(limit: int | None = None) -> threading.Semaphore:
+    """Reset the global concurrency semaphore (useful for testing)."""
+    global _processing_semaphore
+    with _semaphore_lock:
+        new_limit = limit if limit is not None else get_settings().max_concurrent_jobs
+        _processing_semaphore = threading.Semaphore(new_limit)
+        return _processing_semaphore
+
 
 def create_job(
     input_path: Path,
@@ -186,6 +210,7 @@ def process_job(
     job_id: str,
     provider: LLMProvider,
     store: JobStore | None = None,
+    semaphore: threading.Semaphore | None = None,
 ) -> None:
     """Execute the end-to-end processing pipeline for a job in the background."""
     active_store = store or job_store
@@ -194,85 +219,104 @@ def process_job(
         logger.error("Cannot process non-existent job ID: %s", job_id)
         return
 
-    active_store.update_job(job_id, status="processing", progress=0.1)
-
+    sem = semaphore or get_processing_semaphore()
+    sem.acquire()
     try:
-        # Stage 1: PDF extraction
-        extraction_result = extract_pdf_pages(job.input_path)
-        extraction_result.require_extractable_text()
-        active_store.update_job(job_id, progress=0.2)
+        active_store.update_job(job_id, status="processing", progress=0.1)
 
-        # Stage 2: Q&A generation via LLM (progress moves across chunks from 0.2 to 0.9)
-        def on_chunk_progress(chunk_index: int, total_chunks: int) -> None:
-            frac = (chunk_index + 1) / total_chunks if total_chunks > 0 else 1.0
-            p = 0.2 + (0.7 * frac)
-            active_store.update_job(job_id, progress=round(p, 2))
+        try:
+            # Stage 1: PDF extraction
+            extraction_result = extract_pdf_pages(job.input_path)
+            extraction_result.require_extractable_text()
+            active_store.update_job(job_id, progress=0.2)
 
-        settings = get_settings()
-        qa_items = generate_qa(
-            pages=extraction_result.pages,
-            options=job.options,
-            provider=provider,
-            chunk_max_chars=settings.chunk_max_chars,
-            max_chunks=settings.max_chunks,
-            chunk_delay_seconds=settings.chunk_delay_seconds,
-            on_progress=on_chunk_progress,
-        )
-        if not qa_items:
-            raise ValueError("No questions could be generated from this document")
-        active_store.update_job(job_id, progress=0.9)
+            # Stage 2: Q&A generation via LLM (progress moves across chunks from 0.2 to 0.9)
+            def on_chunk_progress(chunk_index: int, total_chunks: int) -> None:
+                frac = (chunk_index + 1) / total_chunks if total_chunks > 0 else 1.0
+                p = 0.2 + (0.7 * frac)
+                active_store.update_job(job_id, progress=round(p, 2))
 
-        # Stage 3: Output PDF generation
-        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        out_path = OUTPUTS_DIR / f"{job_id}.pdf"
-        doc_title = f"Study Guide: {job.input_path.stem.replace('_', ' ').title()}"
-        build_qa_pdf_to_file(title=doc_title, qa_items=qa_items, output_path=out_path)
+            settings = get_settings()
+            qa_items = generate_qa(
+                pages=extraction_result.pages,
+                options=job.options,
+                provider=provider,
+                chunk_max_chars=settings.chunk_max_chars,
+                max_chunks=settings.max_chunks,
+                chunk_delay_seconds=settings.chunk_delay_seconds,
+                on_progress=on_chunk_progress,
+            )
+            if not qa_items:
+                raise ValueError("No questions could be generated from this document")
+            active_store.update_job(job_id, progress=0.9)
 
-        active_store.update_job(
-            job_id, status="done", progress=1.0, output_path=out_path
-        )
-        logger.info("Job %s completed successfully.", job_id)
+            # Stage 3: Output PDF generation
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+            out_path = OUTPUTS_DIR / f"{job_id}.pdf"
+            doc_title = "Study Guide"
+            build_qa_pdf_to_file(
+                title=doc_title, qa_items=qa_items, output_path=out_path
+            )
 
-    except ScannedPDFError:
-        logger.warning("Job %s failed: scanned PDF / insufficient text", job_id)
-        active_store.update_job(
-            job_id,
-            status="failed",
-            error="Scanned PDF not supported yet: document contains little or no extractable text",
-        )
-    except DocumentTooLongError as exc:
-        logger.warning("Job %s failed: document exceeded length limit: %s", job_id, exc)
-        msg = str(exc).strip()
-        active_store.update_job(
-            job_id,
-            status="failed",
-            error=msg if "smaller section" in msg else "Document is too long for now",
-        )
-    except RateLimitError:
-        logger.warning("Job %s failed: AI service rate limited", job_id)
-        active_store.update_job(
-            job_id,
-            status="failed",
-            error="AI service is rate limited, try again later",
-        )
-    except ProviderUnavailableError:
-        logger.warning("Job %s failed: AI service unavailable", job_id)
-        active_store.update_job(
-            job_id,
-            status="failed",
-            error="The AI service is busy right now, please try again in a few minutes.",
-        )
-    except LLMError:
-        logger.warning("Job %s failed: AI service error", job_id)
-        active_store.update_job(
-            job_id,
-            status="failed",
-            error="AI service error, try again later",
-        )
-    except Exception:
-        logger.exception("Job %s failed with unexpected exception", job_id)
-        active_store.update_job(
-            job_id,
-            status="failed",
-            error="Something went wrong",
-        )
+            active_store.update_job(
+                job_id, status="done", progress=1.0, output_path=out_path
+            )
+            logger.info("Job %s completed successfully.", job_id)
+
+        except ScannedPDFError:
+            logger.warning("Job %s failed: scanned PDF / insufficient text", job_id)
+            active_store.update_job(
+                job_id,
+                status="failed",
+                error="Scanned PDF not supported yet: document contains little or no extractable text",
+            )
+        except DocumentTooLongError as exc:
+            logger.warning(
+                "Job %s failed: document exceeded length limit: %s", job_id, exc
+            )
+            msg = str(exc).strip()
+            active_store.update_job(
+                job_id,
+                status="failed",
+                error=msg
+                if "smaller section" in msg
+                else "Document is too long for now",
+            )
+        except RateLimitError:
+            logger.warning("Job %s failed: AI service rate limited", job_id)
+            active_store.update_job(
+                job_id,
+                status="failed",
+                error="AI service is rate limited, try again later",
+            )
+        except ProviderUnavailableError:
+            logger.warning("Job %s failed: AI service unavailable", job_id)
+            active_store.update_job(
+                job_id,
+                status="failed",
+                error="The AI service is busy right now, please try again in a few minutes.",
+            )
+        except LLMError:
+            logger.warning("Job %s failed: AI service error", job_id)
+            active_store.update_job(
+                job_id,
+                status="failed",
+                error="AI service error, try again later",
+            )
+        except Exception:
+            logger.exception("Job %s failed with unexpected exception", job_id)
+            active_store.update_job(
+                job_id,
+                status="failed",
+                error="Something went wrong",
+            )
+    finally:
+        # Privacy: delete uploaded input PDF as soon as processing finishes (success or failure)
+        if job.input_path and job.input_path.exists():
+            try:
+                job.input_path.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "Failed to delete input file %s: %s", job.input_path.name, exc
+                )
+        sem.release()

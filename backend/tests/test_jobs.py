@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
+import threading
 from unittest.mock import patch
 
 from app.llm.base import (
@@ -21,6 +22,13 @@ MULTIPAGE_PDF = FIXTURES_DIR / "multipage_text.pdf"
 SCANNED_PDF = FIXTURES_DIR / "scanned_empty.pdf"
 
 
+def make_input_file(tmp_path: Path, source: Path = MULTIPAGE_PDF) -> Path:
+    """Create a temporary copy of a fixture PDF so process_job can delete it safely."""
+    dest = tmp_path / f"test_input_{source.name}"
+    dest.write_bytes(source.read_bytes())
+    return dest
+
+
 class FakeProvider(LLMProvider):
     """Test LLM provider that returns a preset string or raises a preset exception."""
 
@@ -35,11 +43,12 @@ class FakeProvider(LLMProvider):
         return self.response
 
 
-def test_process_job_success_path() -> None:
+def test_process_job_success_path(tmp_path: Path) -> None:
     """Full pipeline succeeds: extracts text, calls LLM, builds PDF, and marks done."""
     store = JobStore()
     options = GenerationOptions(num_questions=1)
-    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+    input_file = make_input_file(tmp_path, MULTIPAGE_PDF)
+    job = store.create_job(input_path=input_file, options=options)
 
     valid_json = json.dumps(
         {
@@ -70,11 +79,12 @@ def test_process_job_success_path() -> None:
         updated.output_path.unlink()
 
 
-def test_process_job_scanned_pdf_rejected() -> None:
+def test_process_job_scanned_pdf_rejected(tmp_path: Path) -> None:
     """Scanned or low-text PDFs fail at extraction stage with a clear message."""
     store = JobStore()
     options = GenerationOptions()
-    job = store.create_job(input_path=SCANNED_PDF, options=options)
+    input_file = make_input_file(tmp_path, SCANNED_PDF)
+    job = store.create_job(input_path=input_file, options=options)
     provider = FakeProvider("{}")
 
     process_job(job.id, provider=provider, store=store)
@@ -87,11 +97,12 @@ def test_process_job_scanned_pdf_rejected() -> None:
     assert provider.call_count == 0
 
 
-def test_process_job_too_long_document() -> None:
+def test_process_job_too_long_document(tmp_path: Path) -> None:
     """DocumentTooLongError maps to safe message 'Document is too long for now'."""
     store = JobStore()
     options = GenerationOptions()
-    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+    input_file = make_input_file(tmp_path, MULTIPAGE_PDF)
+    job = store.create_job(input_path=input_file, options=options)
     provider = FakeProvider("{}")
 
     with patch(
@@ -106,11 +117,12 @@ def test_process_job_too_long_document() -> None:
     assert updated.error == "Document is too long for now"
 
 
-def test_process_job_progress_across_chunks() -> None:
+def test_process_job_progress_across_chunks(tmp_path: Path) -> None:
     """Multi-chunk processing updates job progress from 0.2 across chunks up to 0.9 and 1.0."""
     store = JobStore()
     options = GenerationOptions()
-    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+    input_file = make_input_file(tmp_path, MULTIPAGE_PDF)
+    job = store.create_job(input_path=input_file, options=options)
 
     progress_history: list[float] = []
     original_update_job = store.update_job
@@ -138,11 +150,12 @@ def test_process_job_progress_across_chunks() -> None:
     assert 1.0 in progress_history
 
 
-def test_process_job_rate_limit_error() -> None:
+def test_process_job_rate_limit_error(tmp_path: Path) -> None:
     """RateLimitError maps to 'AI service is rate limited, try again later'."""
     store = JobStore()
     options = GenerationOptions()
-    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+    input_file = make_input_file(tmp_path, MULTIPAGE_PDF)
+    job = store.create_job(input_path=input_file, options=options)
     provider = FakeProvider(RateLimitError("429 rate limit exceeded"))
 
     process_job(job.id, provider=provider, store=store)
@@ -153,11 +166,12 @@ def test_process_job_rate_limit_error() -> None:
     assert updated.error == "AI service is rate limited, try again later"
 
 
-def test_process_job_provider_unavailable_error() -> None:
+def test_process_job_provider_unavailable_error(tmp_path: Path) -> None:
     """ProviderUnavailableError maps to 'The AI service is busy right now, please try again in a few minutes.'."""
     store = JobStore()
     options = GenerationOptions()
-    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+    input_file = make_input_file(tmp_path, MULTIPAGE_PDF)
+    job = store.create_job(input_path=input_file, options=options)
     provider = FakeProvider(ProviderUnavailableError("503 Service Unavailable"))
 
     process_job(job.id, provider=provider, store=store)
@@ -171,11 +185,12 @@ def test_process_job_provider_unavailable_error() -> None:
     )
 
 
-def test_process_job_other_llm_error() -> None:
+def test_process_job_other_llm_error(tmp_path: Path) -> None:
     """Generic LLMError maps to 'AI service error, try again later'."""
     store = JobStore()
     options = GenerationOptions()
-    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+    input_file = make_input_file(tmp_path, MULTIPAGE_PDF)
+    job = store.create_job(input_path=input_file, options=options)
     provider = FakeProvider(LLMError("Model error"))
 
     process_job(job.id, provider=provider, store=store)
@@ -186,11 +201,12 @@ def test_process_job_other_llm_error() -> None:
     assert updated.error == "AI service error, try again later"
 
 
-def test_process_job_unexpected_error() -> None:
+def test_process_job_unexpected_error(tmp_path: Path) -> None:
     """Uncaught exceptions map safely to 'Something went wrong' without leaking details."""
     store = JobStore()
     options = GenerationOptions()
-    job = store.create_job(input_path=MULTIPAGE_PDF, options=options)
+    input_file = make_input_file(tmp_path, MULTIPAGE_PDF)
+    job = store.create_job(input_path=input_file, options=options)
     provider = FakeProvider("{}")
 
     with patch(
@@ -204,6 +220,126 @@ def test_process_job_unexpected_error() -> None:
     assert updated.status == "failed"
     assert updated.error == "Something went wrong"
     assert "Secret" not in (updated.error or "")
+
+
+def test_process_job_input_file_deleted_on_success(tmp_path: Path) -> None:
+    """The uploaded input PDF is deleted from disk as soon as processing finishes successfully."""
+    store = JobStore()
+    input_file = make_input_file(tmp_path, MULTIPAGE_PDF)
+    assert input_file.exists()
+
+    job = store.create_job(
+        input_path=input_file, options=GenerationOptions(num_questions=1)
+    )
+    valid_json = json.dumps(
+        {"questions": [{"question": "Q?", "answer": "A.", "page": 1}]}
+    )
+    provider = FakeProvider(valid_json)
+
+    process_job(job.id, provider=provider, store=store)
+
+    updated = store.get_job(job.id)
+    assert updated is not None
+    assert updated.status == "done"
+    # Privacy check: input file MUST be unlinked
+    assert not input_file.exists()
+
+    if updated.output_path and updated.output_path.exists():
+        updated.output_path.unlink()
+
+
+def test_process_job_input_file_deleted_on_failure(tmp_path: Path) -> None:
+    """The uploaded input PDF is deleted from disk as soon as processing finishes even if it failed."""
+    store = JobStore()
+    input_file = make_input_file(tmp_path, SCANNED_PDF)
+    assert input_file.exists()
+
+    job = store.create_job(input_path=input_file, options=GenerationOptions())
+    provider = FakeProvider("{}")
+
+    process_job(job.id, provider=provider, store=store)
+
+    updated = store.get_job(job.id)
+    assert updated is not None
+    assert updated.status == "failed"
+    # Privacy check: input file MUST be unlinked on failure as well
+    assert not input_file.exists()
+
+
+def test_concurrency_semaphore_limits_parallel_jobs(tmp_path: Path) -> None:
+    """When concurrent jobs exceed semaphore limit, extra jobs remain queued until a slot frees up."""
+    store = JobStore()
+    sem = threading.Semaphore(2)
+
+    active_count = 0
+    max_active_seen = 0
+    lock = threading.Lock()
+    first_two_entered = threading.Event()
+    release_first_two = threading.Event()
+
+    class SlowProvider(LLMProvider):
+        def generate_json(self, prompt: str, system: str | None = None) -> str:
+            nonlocal active_count, max_active_seen
+            with lock:
+                active_count += 1
+                if active_count > max_active_seen:
+                    max_active_seen = active_count
+                if active_count == 2:
+                    first_two_entered.set()
+            release_first_two.wait(timeout=5.0)
+            with lock:
+                active_count -= 1
+            return json.dumps(
+                {"questions": [{"question": "Q?", "answer": "A.", "page": 1}]}
+            )
+
+    provider = SlowProvider()
+    jobs = []
+    threads = []
+
+    for i in range(3):
+        in_path = tmp_path / f"job_{i}.pdf"
+        in_path.write_bytes(MULTIPAGE_PDF.read_bytes())
+        job = store.create_job(
+            input_path=in_path, options=GenerationOptions(num_questions=1)
+        )
+        jobs.append(job)
+
+    for job in jobs:
+        t = threading.Thread(
+            target=process_job,
+            args=(job.id, provider, store, sem),
+        )
+        t.daemon = True
+        threads.append(t)
+        t.start()
+
+    # Wait for 2 jobs to enter processing in provider
+    assert first_two_entered.wait(timeout=3.0)
+
+    # At this point, job 0 and job 1 are processing, job 2 should still be queued
+    processing_count = sum(
+        1 for j in jobs if getattr(store.get_job(j.id), "status", None) == "processing"
+    )
+    queued_count = sum(
+        1 for j in jobs if getattr(store.get_job(j.id), "status", None) == "queued"
+    )
+    assert processing_count == 2
+    assert queued_count == 1
+    assert max_active_seen == 2
+
+    # Release the first two jobs
+    release_first_two.set()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    # All 3 jobs should be done
+    for job in jobs:
+        rec = store.get_job(job.id)
+        assert rec is not None
+        assert rec.status == "done"
+        if rec.output_path and rec.output_path.exists():
+            rec.output_path.unlink()
 
 
 def test_cleanup_expired_deletes_files_and_records() -> None:

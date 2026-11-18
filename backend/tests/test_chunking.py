@@ -79,4 +79,3 @@ def test_chunking_oversized_single_paragraph_hard_splits() -> None:
     for chunk in chunks:
         assert chunk[0][0] == 1
         assert len(chunk[0][1]) <= 50
-

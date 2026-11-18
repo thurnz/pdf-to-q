@@ -104,4 +104,3 @@ def chunk_pages(
         chunks.append(current_chunk)
 
     return chunks
-

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
@@ -15,6 +16,9 @@ from app.services.jobs import cleanup_expired
 logger = logging.getLogger(__name__)
 
 CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes
+STORAGE_DIR = Path(__file__).resolve().parent.parent / "storage"
+UPLOADS_DIR = STORAGE_DIR / "uploads"
+OUTPUTS_DIR = STORAGE_DIR / "outputs"
 
 
 async def _periodic_cleanup() -> None:
@@ -34,6 +38,10 @@ async def _periodic_cleanup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application startup and shutdown lifecycle tasks."""
+    # Ensure storage directories exist on startup
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
     cleanup_task = asyncio.create_task(_periodic_cleanup())
     try:
         yield

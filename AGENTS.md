@@ -15,17 +15,19 @@ Pipeline: **upload PDF → extract text → chunk → LLM generates Q&A (JSON) �
 ## Repository structure
 
 ```
-pdf-qa-app/
+pdf-to-q/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            # FastAPI app, CORS, router registration
+│   │   ├── main.py            # FastAPI app, CORS, lifespan startup/cleanup
 │   │   ├── config.py          # Settings loaded from environment
-│   │   ├── schemas.py         # Pydantic models (QAItem, JobStatus, ...)
+│   │   ├── schemas.py         # Pydantic models (QAItem, JobStatus, GenerationOptions)
 │   │   ├── api/routes.py      # POST /jobs, GET /jobs/{id}, GET /jobs/{id}/download
 │   │   ├── services/          # pdf_extract, chunking, qa_generator, pdf_builder, jobs
 │   │   ├── llm/               # base.py (interface), gemini.py, openai_compat.py, factory.py
-│   │   ├── prompts/           # Prompt templates (plain text files)
-│   │   └── utils/rate_limit.py
+│   │   ├── prompts/           # Prompt templates (qa_generation.txt)
+│   │   └── utils/rate_limit.py# In-memory per-IP rate limiter
+│   ├── scripts/
+│   │   └── list_models.py     # CLI helper to list models available to GEMINI_API_KEY
 │   ├── storage/               # Temp uploads/outputs (gitignored)
 │   ├── tests/
 │   ├── requirements.txt
@@ -33,8 +35,9 @@ pdf-qa-app/
 ├── frontend/
 │   ├── src/
 │   │   ├── api/client.ts
-│   │   ├── components/        # UploadDropzone, OptionsForm, ProgressView, ResultView
+│   │   ├── components/        # UploadDropzone, OptionsForm, ProgressView, ResultView, ErrorView
 │   │   ├── hooks/useJobPolling.ts
+│   │   ├── utils/validateFile.ts
 │   │   ├── types/index.ts     # Must mirror backend/app/schemas.py
 │   │   └── index.css          # Tailwind entry: @import "tailwindcss"; plus @theme tokens
 │   ├── package.json
@@ -151,17 +154,18 @@ This project uses **Tailwind CSS v4**, not v3. Most training data and online tut
 
 - **All LLM calls go through the `LLMProvider` interface** in `backend/app/llm/base.py` (`generate_json(prompt, schema)` or similar). Never import a vendor SDK directly in `services/`.
 - New providers are added as a new module in `backend/app/llm/` and registered in `factory.py`. Provider and model selection come from environment config, not hard-coded values.
+- `GEMINI_MODEL` is a required setting with no default. Use `python scripts/list_models.py` to inspect currently available models for the configured key.
 - Prefer OpenAI-compatible clients where possible, so providers are swappable by changing `base_url` and model name.
 - **Structured output:** ask for JSON only, strip code fences, parse, and **validate with Pydantic**. On validation failure, retry a limited number of times (default 2), then fail the job with a clear error.
-- **Rate limits:** free tiers have per-minute and per-day caps. Implement backoff on 429s, and support a fallback chain across providers. Limit concurrent LLM calls.
+- **Rate limits & resilience:** free tiers have per-minute and per-day caps. Retry 429, 500, and 503 errors with exponential backoff and jitter (`LLM_MAX_ATTEMPTS`, `LLM_RETRY_BASE_SECONDS`), honoring `Retry-After`. Support fallback to `GEMINI_FALLBACK_MODEL` when primary model retries are exhausted. Raise `ProviderUnavailableError` or `RateLimitError` as appropriate.
 - **Grounding:** prompts must instruct the model to use only the provided source text, include a page reference where possible, and never invent facts. Keep prompts in `backend/app/prompts/`, not inline in code.
 - Keep prompts and output schemas versioned in the repo; changes to them should come with updated tests or sample outputs.
 
 ## Processing pipeline notes
 
 - **Extraction:** use PyMuPDF (or pdfplumber). Detect pages with little or no text and surface a clear "scanned PDF not supported yet" message rather than failing silently. OCR is a future addition.
-- **Chunking:** chunk by page and token/character budget with a small overlap. Long documents use map-reduce: Q&A per chunk, then merge and dedupe.
-- **Jobs:** uploads create a job and return immediately. Processing runs in the background; the frontend polls `GET /jobs/{id}`. Statuses: `queued | processing | done | failed`, with `progress` from 0 to 1.
+- **Chunking:** chunk by page and token/character budget (`CHUNK_MAX_CHARS`, default 30000) with small overlap. Long documents use map-reduce: Q&A per chunk, sequential LLM calls (with optional `CHUNK_DELAY_SECONDS`), then merge, deduplicate, sort by page, and trim. If chunks exceed `MAX_CHUNKS` (default 12), raise `DocumentTooLongError`.
+- **Jobs & concurrency:** uploads create a job and return immediately. Processing runs in the background; the frontend polls `GET /jobs/{id}`. Statuses: `queued | processing | done | failed`, with `progress` from 0 to 1. Limit simultaneous processing with a semaphore (`MAX_CONCURRENT_JOBS`, default 2); extra submissions remain `queued` until a worker slot is freed.
 - **Output PDF:** built programmatically with **reportlab** (pure pip, no system libraries) in `services/pdf_builder.py`. Do not use WeasyPrint or any HTML-to-PDF tool, since they need system libraries like Pango.
   - Use Platypus (`SimpleDocTemplate`, `Paragraph`, `Spacer`, `PageBreak`) so long answers wrap and flow across pages.
   - reportlab `Paragraph` parses XML-like markup, so **escape all LLM-generated text** (`xml.sax.saxutils.escape`) before passing it in. Unescaped `<`, `>` or `&` can crash the build or break layout.
@@ -174,10 +178,12 @@ Students may upload copyrighted or personal material. Treat uploads as sensitive
 
 - Validate uploads server-side: content type **and** magic bytes (`%PDF`), a maximum file size, and a maximum page count. Limits come from `config.py`.
 - Never use the user's filename as a path. Generate server-side IDs (UUIDs) for stored files.
-- Store uploads and outputs only in `backend/storage/`, and **delete them after a short retention period** (default 1 hour) via a cleanup task. Don't log document contents.
+- **Immediate upload deletion:** delete the uploaded input PDF immediately as soon as processing finishes (both on success and failure). Only generated output PDFs remain until `FILE_RETENTION_SECONDS` (default 1 hour) expires via the periodic cleanup task.
+- **Safe download headers:** serve downloads with `Content-Disposition: attachment; filename="study-guide.pdf"`; never reflect client filenames in download headers or generated document titles.
+- Never log document contents, prompts, or user filenames.
 - Never commit secrets. API keys live in `.env` (gitignored); keep `.env.example` current with placeholder values only.
 - Treat PDF text as **untrusted input**: it may contain prompt-injection instructions. Keep system instructions separate from document content, and never let document text change tool behavior or configuration.
-- Apply per-IP (or per-user) rate limiting on `POST /jobs` to protect free-tier quotas.
+- Apply per-IP (or per-user) rate limiting on `POST /jobs` (`RATE_LIMIT_PER_MINUTE`, default 5) to protect free-tier quotas.
 - Configure CORS with an explicit origin allowlist; no wildcard in production.
 - Do not add analytics or third-party trackers without being asked.
 
@@ -223,8 +229,8 @@ Pause and ask the user before:
 | --------------- | ------------------------------------------------------------------------------------------------------------ |
 | Run frontend    | `cd frontend && npm run dev`                                                                                 |
 | Run backend     | `cd backend && uvicorn app.main:app --reload`                                                                |
-| Frontend checks | `npm run lint && npx tsc --noEmit && npm run test`                                                           |
-| Backend checks  | `ruff check . && pytest`                                                                                     |
+| Frontend checks | `npm run lint && npx tsc --noEmit && npm run test && npm run build`                                          |
+| Backend checks  | `ruff check . && ruff format --check . && pytest`                                                            |
 | Env template    | `backend/.env.example`                                                                                       |
 | UI work         | Use the `frontend-design` skill (`.agents/skills/frontend-design/`)                                          |
 | Styling         | Tailwind v4: `@import "tailwindcss"` in `src/index.css`, `@tailwindcss/vite` plugin, no `tailwind.config.js` |

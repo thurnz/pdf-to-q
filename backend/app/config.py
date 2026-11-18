@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Rate limiting (requests per minute per IP on POST /jobs)
     rate_limit_per_minute: int = 5
 
+    # Concurrency limit (maximum simultaneous processing jobs)
+    max_concurrent_jobs: int = 2
+
     # File retention (seconds)
     file_retention_seconds: int = 3600
 

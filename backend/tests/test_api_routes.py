@@ -84,7 +84,17 @@ def test_submit_poll_and_download_flow(client: TestClient) -> None:
     download_resp = client.get(f"/jobs/{job_id}/download")
     assert download_resp.status_code == 200
     assert download_resp.headers["content-type"] == "application/pdf"
+    assert (
+        download_resp.headers["content-disposition"]
+        == 'attachment; filename="study-guide.pdf"'
+    )
     assert download_resp.content.startswith(b"%PDF")
+
+    # 4. Verify input upload file was deleted immediately after processing
+    uploaded_file = (
+        Path(__file__).resolve().parent.parent / "storage" / "uploads" / f"{job_id}.pdf"
+    )
+    assert not uploaded_file.exists()
 
 
 def test_submit_non_pdf_file_rejected(client: TestClient) -> None:
