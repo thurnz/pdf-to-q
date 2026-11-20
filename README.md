@@ -162,3 +162,72 @@ npx tsc --noEmit
 npm run test
 npm run build
 ```
+
+---
+
+## Deployment
+
+The recommended setup is **Render** for the backend (free tier with auto-spin-up) and any static host (Netlify, Vercel, GitHub Pages, Render Static Sites) for the frontend.
+
+> [!IMPORTANT]
+> Never commit `.env` files. Set secrets in your host's environment dashboard.
+
+### Deploy Order
+
+Always deploy the **backend first** so the backend URL is available when building the frontend.
+
+---
+
+### Backend on Render (Python Web Service)
+
+| Render Setting | Value |
+| :--- | :--- |
+| **Runtime** | Python 3 |
+| **Build Command** | `pip install -r requirements.txt` |
+| **Start Command** | `uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'` |
+| **Working Directory** | `backend` |
+
+> [!NOTE]
+> `--proxy-headers` tells Uvicorn to trust `X-Forwarded-For` headers injected by Render's load balancer, so per-IP rate limiting uses the real client IP, not the proxy's IP.
+> `--forwarded-allow-ips='*'` trusts all upstream proxies — safe on Render, which controls the network edge.
+
+**Required environment variables** (set in Render's Environment tab):
+
+| Variable | Value |
+| :--- | :--- |
+| `GEMINI_API_KEY` | Your Google AI Studio key |
+| `GEMINI_MODEL` | A current model name, e.g. `gemini-2.5-flash` |
+| `ALLOWED_ORIGINS` | Comma-separated list of your frontend URLs, e.g. `https://my-app.netlify.app` |
+
+All other backend settings have sensible defaults and are optional. See the [Environment Variables Reference](#environment-variables-reference) table for the full list.
+
+---
+
+### Frontend on a Static Host (Netlify / Vercel / GitHub Pages)
+
+**Required build-time variable** — set this in your host's build environment before `npm run build`:
+
+| Variable | Value |
+| :--- | :--- |
+| `VITE_API_BASE_URL` | Your deployed backend URL, e.g. `https://my-backend.onrender.com` |
+
+> [!CAUTION]
+> The build will fail with a clear error message if `VITE_API_BASE_URL` is not set in production mode. This is intentional — a missing URL would silently default to `localhost` and break all API calls in production.
+
+**Example build commands:**
+
+```bash
+# Netlify / Vercel (set env var in dashboard, then):
+npm run build
+
+# Or inline for one-off deploys:
+VITE_API_BASE_URL=https://my-backend.onrender.com npm run build
+```
+
+**Static site settings:**
+
+| Setting | Value |
+| :--- | :--- |
+| **Build Command** | `npm run build` |
+| **Publish Directory** | `frontend/dist` |
+| **Base Directory** | `frontend` (or set in repo root with `cd frontend &&` prefix) |

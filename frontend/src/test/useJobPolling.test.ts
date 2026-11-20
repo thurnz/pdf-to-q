@@ -127,6 +127,26 @@ describe('useJobPolling', () => {
     expect(capturedSignal?.aborted).toBe(true)
   })
 
+  it('stops polling immediately with a lost-job message on a 404 response', async () => {
+    const notFoundError = new client.ApiError(404, 'Job not found')
+    const getJobSpy = vi.spyOn(client, 'getJob').mockRejectedValue(notFoundError)
+
+    const { result } = renderHook(() => useJobPolling('job-lost'))
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(result.current.isPolling).toBe(false)
+    expect(result.current.error).toMatch(/your job was lost/i)
+
+    // No further polls should occur
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3)
+    })
+    expect(getJobSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('stops with an error after 5 consecutive network failures', async () => {
     const networkError = new client.ApiError(
       0,

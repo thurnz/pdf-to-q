@@ -1,25 +1,39 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as client from '../api/client'
 import App from '../App'
 import type { JobStatus } from '../types'
 
+// Always stub the health check so App renders in 'ready' state without real fetches
+function mockHealthReady() {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: 'ok' }), { status: 200 })),
+  )
+}
+
 describe('App', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    mockHealthReady()
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  it('renders page title and initial idle form', () => {
+  it('renders page title and initial idle form', async () => {
     render(<App />)
+    // Wait a tick so the async health-check state update is wrapped in act
+    await act(async () => {
+      await Promise.resolve()
+    })
     expect(
       screen.getByRole('heading', { level: 1, name: /study guide generator/i }),
     ).toBeInTheDocument()
     expect(screen.getByRole('region', { name: /upload area/i })).toBeInTheDocument()
+    // Button is disabled: no file selected (server-ready doesn't affect disabled state when no file)
     expect(screen.getByRole('button', { name: /generate study guide/i })).toBeDisabled()
   })
 
@@ -125,5 +139,60 @@ describe('App', () => {
     // Should return to idle state
     expect(await screen.findByRole('region', { name: /upload area/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /generate study guide/i })).toBeInTheDocument()
+  })
+
+  it('shows waking notice and disables upload when server is slow to respond', async () => {
+    // Replace the health-ready stub with a never-resolving one to simulate a cold start
+    vi.restoreAllMocks()
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise(() => {})))
+
+    vi.useFakeTimers()
+    render(<App />)
+
+    // Before the timer fires, no notice
+    expect(screen.queryByRole('status')).toBeNull()
+
+    // Advance past the 3 s threshold
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100)
+    })
+
+    const notice = screen.getByRole('status')
+    expect(notice).toHaveTextContent(/waking up the server/i)
+
+    // The submit button should be disabled (server not ready)
+    expect(screen.getByRole('button', { name: /generate study guide/i })).toBeDisabled()
+
+    vi.useRealTimers()
+  })
+
+  it('shows error notice when health check fails', async () => {
+    vi.restoreAllMocks()
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    const { findByRole } = render(<App />)
+
+    const notice = await findByRole('status')
+    expect(notice).toHaveTextContent(/could not reach the server/i)
+  })
+
+  it('shows lost-job error when polling gets a 404', async () => {
+    const user = userEvent.setup()
+
+    vi.spyOn(client, 'createJob').mockResolvedValueOnce({
+      id: 'job-lost-789',
+      status: 'queued',
+    })
+    vi.spyOn(client, 'getJob').mockRejectedValue(new client.ApiError(404, 'Job not found'))
+
+    const { container } = render(<App />)
+
+    const validPdf = new File(['%PDF-1.4 dummy'], 'lecture.pdf', { type: 'application/pdf' })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await user.upload(fileInput, validPdf)
+    await user.click(screen.getByRole('button', { name: /generate study guide/i }))
+
+    const errorAlert = await screen.findByRole('alert')
+    expect(errorAlert).toHaveTextContent(/your job was lost/i)
   })
 })

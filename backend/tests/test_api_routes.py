@@ -184,6 +184,43 @@ def test_download_before_done_returns_409(client: TestClient) -> None:
     assert "Job is not done yet" in response.json()["detail"]
 
 
+def test_rate_limit_uses_x_forwarded_for_ip(client: TestClient) -> None:
+    """Rate limiting uses the real client IP from X-Forwarded-For when present (proxy deployment)."""
+    rate_limited_settings = Settings(
+        _env_file=None,
+        gemini_model="test-model",
+        rate_limit_per_minute=1,
+    )
+    app.dependency_overrides[get_settings] = lambda: rate_limited_settings
+    rate_limiter.reset()
+
+    pdf_bytes = MULTIPAGE_PDF.read_bytes()
+
+    # First request from "real" client behind proxy – should succeed
+    resp1 = client.post(
+        "/jobs",
+        files={"file": ("test.pdf", pdf_bytes, "application/pdf")},
+        headers={"X-Forwarded-For": "203.0.113.42"},
+    )
+    assert resp1.status_code == 202
+
+    # Second request from same real IP – should be rate limited
+    resp2 = client.post(
+        "/jobs",
+        files={"file": ("test.pdf", pdf_bytes, "application/pdf")},
+        headers={"X-Forwarded-For": "203.0.113.42"},
+    )
+    assert resp2.status_code == 429
+
+    # Third request from a different real IP – should still succeed (different bucket)
+    resp3 = client.post(
+        "/jobs",
+        files={"file": ("test.pdf", pdf_bytes, "application/pdf")},
+        headers={"X-Forwarded-For": "203.0.113.99"},
+    )
+    assert resp3.status_code == 202
+
+
 def test_rate_limit_exceeded_returns_429(client: TestClient) -> None:
     """Submitting more than rate_limit_per_minute requests returns 429."""
     rate_limited_settings = Settings(

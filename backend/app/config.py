@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # CORS
     allowed_origins: Annotated[list[str], NoDecode] = DEFAULT_ALLOWED_ORIGINS
 
+    # Server port (read by start command; Render sets PORT automatically)
+    port: int = 8000
+
     @field_validator("gemini_model")
     @classmethod
     def validate_gemini_model(cls, value: str) -> str:

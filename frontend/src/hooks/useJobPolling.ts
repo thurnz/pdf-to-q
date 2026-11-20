@@ -70,10 +70,12 @@ export function useJobPolling(jobId: string | null | undefined): UseJobPollingRe
           return
         }
 
-        // Fatal client error like 404 (Job not found) terminates immediately
+        // Fatal: job no longer exists (server restarted and lost in-memory state)
         if (err instanceof ApiError && err.status === 404) {
           setIsPolling(false)
-          setError(err.message)
+          setError(
+            'Your job was lost (the server may have restarted). Please upload again.',
+          )
           return
         }
 

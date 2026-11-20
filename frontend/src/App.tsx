@@ -6,6 +6,7 @@ import { ProgressView } from './components/ProgressView'
 import { ResultView } from './components/ResultView'
 import { UploadDropzone } from './components/UploadDropzone'
 import { useJobPolling } from './hooks/useJobPolling'
+import { useServerReady } from './hooks/useServerReady'
 import type { GenerationOptions } from './types'
 import { validateFile } from './utils/validateFile'
 
@@ -24,6 +25,8 @@ export default function App() {
   const [options, setOptions] = useState<GenerationOptions>(DEFAULT_OPTIONS)
   const [jobId, setJobId] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  const { serverState, notice: serverNotice } = useServerReady()
 
   // Poll only while processing
   const { job, error: pollError } = useJobPolling(appState === 'processing' ? jobId : null)
@@ -86,6 +89,10 @@ export default function App() {
     setOptions(DEFAULT_OPTIONS)
   }
 
+  const isServerReady = serverState === 'ready'
+  const uploadDisabled =
+    !selectedFile || Boolean(fileError) || !isServerReady || appState !== 'idle'
+
   return (
     <main className="min-h-screen bg-page text-body flex flex-col items-center px-4 py-12 sm:py-20">
       {/* ── Header ───────────────────────────────────────── */}
@@ -99,6 +106,21 @@ export default function App() {
         </p>
       </header>
 
+      {/* ── Server warm-up notice ─────────────────────────── */}
+      {(serverState === 'waking' || serverState === 'error') && serverNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`w-full max-w-2xl mb-4 rounded-lg border px-4 py-3 text-sm ${
+            serverState === 'error'
+              ? 'border-red-200 bg-red-50 text-red-800'
+              : 'border-amber-200 bg-amber-50 text-amber-800'
+          }`}
+        >
+          {serverNotice}
+        </div>
+      )}
+
       {/* ── Content Area ─────────────────────────────────── */}
       <div className="w-full max-w-2xl flex flex-col items-center gap-6">
         {appState === 'idle' && (
@@ -110,7 +132,7 @@ export default function App() {
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={!selectedFile || Boolean(fileError)}
+              disabled={uploadDisabled}
               className="w-full py-3 px-6 rounded-lg font-semibold bg-primary hover:bg-primary-hover text-primary-fg transition-colors focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:opacity-40 disabled:cursor-not-allowed shadow-xs"
             >
               Generate Study Guide
